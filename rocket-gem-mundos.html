@@ -21,6 +21,7 @@
 <div id="app">
   <div class="row" id="themes"></div>
   <div class="row" id="views"></div>
+  <div class="row" id="modes"></div>
   <div id="stage"><canvas id="cv"></canvas></div>
   <div id="info"><span id="desc"></span><br>Toca la pantalla para lanzar · la roja te devuelve a la última gema</div>
 </div>
@@ -39,16 +40,21 @@ const gemPos=(i,g,t)=>{const p=rp(i),a=gemAng(i,g,t);return{x:p.x+Math.cos(a)*R,
 const clamp01=v=>v<0?0:v>1?1:v;
 
 /* ---------- lógica del juego (idéntica al prototipo anterior) ---------- */
-let G, auto=true;
+let G, auto=true, MODE='orbit';   // 'orbit' = bola pegada al racimo; 'p2p' = punto a punto
 function reset(){
   G={t:0,cur:0,state:'aim',wait:0,score:0,launches:0,fly:0,timer:0,
-     ball:{x:RX[0],y:0,vx:0,vy:0},gems:[],parts:[],trail:[],cam:rp(0).y-440};
+     ball:{x:RX[0],y:0,vx:0,vy:0,a:0},gems:[],parts:[],trail:[],cam:rp(0).y-440,slot:0,snap:1,snapFrom:null,free:[]};
   for(let i=0;i<N;i++){const r=[];for(let k=0;k<5;k++)r.push({a0:k*TAU/5+i*.7,k:(i>=1&&k===(i*2)%5)?'r':'y',alive:true});G.gems.push(r)}
+  G.slot=G.gems[0][0].a0+Math.PI/5;   // la bola parte en un hueco entre gemas y gira con el racimo
+  // gemas sueltas en la línea ideal de cada tramo (premian el tiro limpio) y una roja de señuelo al costado
+  for(let i=0;i<N;i++){const A=rp(i),B=rp(i+1),dx=B.x-A.x,dy=B.y-A.y,L=Math.hypot(dx,dy),nx=-dy/L,ny=dx/L,s=i%2?-1:1;
+    for(const u of [.38,.62])G.free.push({x:A.x+dx*u,y:A.y+dy*u,k:'y',alive:true});
+    G.free.push({x:A.x+dx*.5+nx*30*s,y:A.y+dy*.5+ny*30*s,k:'r',alive:true})}
 }
 function burst(x,y,col,n=9){for(let i=0;i<n;i++){const a=Math.random()*TAU,s=60+Math.random()*120;G.parts.push({x,y,vx:Math.cos(a)*s,vy:Math.sin(a)*s,life:.5,max:.5,col,sz:3+Math.random()*3})}}
-function launch(){if(G.state!=='aim')return;const a=aimAng(G.cur);G.state='fly';G.launches++;G.fly=0;G.ball.vx=Math.cos(a)*SPEED;G.ball.vy=Math.sin(a)*SPEED}
+function launch(){if(G.state!=='aim'||(MODE==='orbit'&&G.snap<.8))return;const a=MODE==='orbit'?G.ball.a:aimAng(G.cur);G.state='fly';G.launches++;G.fly=0;G.ball.vx=Math.cos(a)*SPEED;G.ball.vy=Math.sin(a)*SPEED}
 function die(){G.state='dead';G.timer=.6;burst(G.ball.x,G.ball.y,'#ff4040',14)}
-function update(dt){
+function updateP2P(dt){
   G.t+=dt;
   const tg=rp(G.cur).y-440;G.cam+=(tg-G.cam)*Math.min(1,dt*4);
   for(const p of G.parts){p.x+=p.vx*dt;p.y+=p.vy*dt;p.life-=dt}G.parts=G.parts.filter(p=>p.life>0);
@@ -85,6 +91,61 @@ function update(dt){
     }
   }else if(G.state==='dead'){
     G.timer-=dt;if(G.timer<=0){const c=rp(G.cur);b.x=c.x;b.y=c.y;G.state='aim';G.wait=0}
+  }else if(G.state==='win'){
+    G.timer-=dt;if(G.timer<=0)reset();
+  }
+}
+
+/* ---------- modo órbita: la bola gira pegada al racimo y sale hacia donde apunta ---------- */
+const slotAng=(i,t)=>G.slot+dirOf(i)*OM*t;
+const slotPos=(i,t)=>{const c=rp(i),a=slotAng(i,t);return{x:c.x+Math.cos(a)*R,y:c.y+Math.sin(a)*R,a}};
+// la bola entra al racimo j y se acomoda en el hueco más cercano entre dos gemas
+function capture(j,b){
+  const c=rp(j),th=Math.atan2(b.y-c.y,b.x-c.x);let best=0,bd=9;
+  for(const g of G.gems[j]){const gap=gemAng(j,g,G.t)+Math.PI/5,d=Math.abs(wrap(gap-th));if(d<bd){bd=d;best=gap}}
+  G.cur=j;G.slot=best-dirOf(j)*OM*G.t;G.snap=0;G.snapFrom={x:b.x,y:b.y};G.state='aim';G.wait=0;
+}
+// ¿un tiro con desvío `off` (rad) respecto al centro del siguiente racimo llega sin tocar una roja?
+function safeOff(off){
+  const c=rp(G.cur),n=rp(G.cur+1),goal=G.cur+1>=N,a=aimAng(G.cur)+off,u={x:Math.cos(a),y:Math.sin(a)},P={x:c.x+u.x*R,y:c.y+u.y*R};
+  const rr=goal?30:R-3,fx=P.x-n.x,fy=P.y-n.y,b2=fx*u.x+fy*u.y,disc=b2*b2-(fx*fx+fy*fy-rr*rr);
+  if(disc<0)return false;
+  const s=-b2-Math.sqrt(disc);if(s<0)return false;
+  for(let d=0;d<=s;d+=6){
+    const p={x:P.x+u.x*d,y:P.y+u.y*d},ts=G.t+d/SPEED;
+    if(!goal)for(const g of G.gems[G.cur+1]){if(g.alive&&g.k==='r'){const q=gemPos(G.cur+1,g,ts);if(Math.hypot(q.x-p.x,q.y-p.y)<22)return false}}
+    for(const f of G.free)if(f.alive&&f.k==='r'&&Math.hypot(f.x-p.x,f.y-p.y)<22)return false;
+  }
+  return true;
+}
+function updateOrbit(dt){
+  G.t+=dt;
+  const tg=rp(G.cur).y-440;G.cam+=(tg-G.cam)*Math.min(1,dt*4);
+  for(const p of G.parts){p.x+=p.vx*dt;p.y+=p.vy*dt;p.life-=dt}G.parts=G.parts.filter(p=>p.life>0);
+  for(const p of G.trail)p.age+=dt;G.trail=G.trail.filter(p=>p.age<TRAIL);
+  const b=G.ball;
+  if(G.state==='aim'){
+    const sp=slotPos(G.cur,G.t);b.a=sp.a;G.wait+=dt;
+    if(G.snap<1){G.snap=Math.min(1,G.snap+dt/.18);const e=G.snap*G.snap*(3-2*G.snap);b.x=G.snapFrom.x+(sp.x-G.snapFrom.x)*e;b.y=G.snapFrom.y+(sp.y-G.snapFrom.y)*e}
+    else{b.x=sp.x;b.y=sp.y}
+    if(auto&&G.wait>.5&&G.snap>=1){const aim=aimAng(G.cur);for(const off of [0,.05,-.05,.1,-.1,.14,-.14]){if(Math.abs(wrap(sp.a-(aim+off)))<.03&&safeOff(off)){launch();break}}
+      if(G.wait>9&&Math.abs(wrap(sp.a-aim))<.04)launch()}   // ponytail: si ningún desvío es seguro tras ~3 vueltas, dispara igual
+  }else if(G.state==='fly'){
+    b.x+=b.vx*dt;b.y+=b.vy*dt;G.fly+=dt;
+    G.trail.push({x:b.x,y:b.y,age:0},{x:b.x-b.vx*dt*.5,y:b.y-b.vy*dt*.5,age:.02});
+    const hit=(g,x,y)=>{if(!g.alive||G.state!=='fly')return;if(Math.hypot(x-b.x,y-b.y)<19){g.alive=false;if(g.k==='y'){G.score+=10;burst(x,y,'#ffd23a')}else die()}};
+    for(let i=0;i<N;i++){if(i===G.cur)continue;for(const g of G.gems[i]){const q=gemPos(i,g,G.t);hit(g,q.x,q.y)}}
+    for(const f of G.free)hit(f,f.x,f.y);
+    if(G.state==='fly'){
+      const gp=rp(N);
+      if(Math.hypot(gp.x-b.x,gp.y-b.y)<30){G.cur=N;G.state='win';G.timer=2.4;burst(gp.x,gp.y,'#7dff9a',26)}
+      else{
+        for(let j=G.cur+1;j<N;j++){const c=rp(j);if(Math.hypot(c.x-b.x,c.y-b.y)<=R-3){capture(j,b);break}}
+        if(G.state==='fly'&&(b.x<-40||b.x>W+40||b.y>rp(G.cur).y+360||G.fly>2.6))die();
+      }
+    }
+  }else if(G.state==='dead'){
+    G.timer-=dt;if(G.timer<=0){const sp=slotPos(G.cur,G.t);b.x=sp.x;b.y=sp.y;b.a=sp.a;G.snap=1;G.state='aim';G.wait=0}
   }else if(G.state==='win'){
     G.timer-=dt;if(G.timer<=0)reset();
   }
@@ -177,6 +238,14 @@ function hud(T){
   txt(String(G.score),W/2,108,56,'#fff',T.ink,9);txt('tiros '+G.launches,W/2,150,16,'#fff',T.ink,5);
 }
 
+/* pista de apuntado: en órbita es un trazo corto desde la bola; en punto a punto va al siguiente racimo */
+function aimHint(col){
+  let p,q;
+  if(MODE==='orbit'){const b=G.ball,a=b.a||0;p=PJ(b.x,b.y);q=PJ(b.x+Math.cos(a)*90,b.y+Math.sin(a)*90)}
+  else{const a=rp(G.cur),b=rp(G.cur+1);p=PJ(a.x,a.y);q=PJ(b.x,b.y)}
+  ctx.setLineDash([1,10]);ctx.lineCap='round';ctx.lineWidth=4;ctx.strokeStyle=col;path([p,q],false);ctx.stroke();ctx.setLineDash([]);
+}
+
 /* ---------- composición por vista ---------- */
 function drawScene(T){
   const iso=VIEW==='iso',gp=rp(N);
@@ -186,9 +255,10 @@ function drawScene(T){
     const [hx,hy]=PJ(gp.x,gp.y);heartBody(T,hx,hy+Math.sin(G.t*2)*3,G.state==='win');
     ctx.setLineDash([3,7]);ctx.lineWidth=1.5;ctx.strokeStyle='rgba(43,34,80,.2)';
     for(let i=0;i<N;i++){const [x,y]=PJ(rp(i).x,rp(i).y);ctx.beginPath();ctx.arc(x,y,R,0,TAU);ctx.stroke()}ctx.setLineDash([]);
-    if(G.state==='aim'){const a=rp(G.cur),b=rp(G.cur+1),[x0,y0]=PJ(a.x,a.y),[x1,y1]=PJ(b.x,b.y);ctx.setLineDash([1,10]);ctx.lineCap='round';ctx.lineWidth=4;ctx.strokeStyle='rgba(43,34,80,.5)';path([[x0,y0],[x1,y1]],false);ctx.stroke();ctx.setLineDash([])}
+    if(G.state==='aim')aimHint('rgba(43,34,80,.5)');
     for(let i=0;i<N;i++){const p=rp(i),py=PJ(p.x,p.y)[1];if(py<-60||py>H+60)continue;for(const g of G.gems[i]){if(!g.alive)continue;const q=gemPos(i,g,G.t),[x,y]=PJ(q.x,q.y);gemBody(T,x,y,q.a,g.k,true,false)}}
     for(const p of G.trail)trailDot(T,p);
+    if(MODE==='orbit')G.free.forEach((f,fi)=>{if(!f.alive)return;const [x,y]=PJ(f.x,f.y);gemBody(T,x,y+Math.sin(G.t*3+fi)*2,G.t*2+fi,f.k,false,false)});
     if(G.state!=='dead'&&G.state!=='win'){const [x,y]=PJ(G.ball.x,G.ball.y);ballBody(T,x,y)}
   }else{
     ground(T);
@@ -196,12 +266,13 @@ function drawScene(T){
     for(let i=0;i<N;i++){const [x,y]=PJ(rp(i).x,rp(i).y);if(y<-60||y>H+60)continue;
       ctx.setLineDash([3,7]);ctx.lineWidth=1.8;ctx.strokeStyle='rgba(255,255,255,.4)';ctx.beginPath();ctx.ellipse(x,y,R*KX,R*KY,0,0,TAU);ctx.stroke();ctx.setLineDash([]);platform(T,x,y,24)}
     const [hx,hy]=PJ(gp.x,gp.y);platform(T,hx,hy,34,9);
-    if(G.state==='aim'){const a=rp(G.cur),b=rp(G.cur+1),[x0,y0]=PJ(a.x,a.y),[x1,y1]=PJ(b.x,b.y);ctx.setLineDash([1,10]);ctx.lineCap='round';ctx.lineWidth=4;ctx.strokeStyle='rgba(255,255,255,.75)';path([[x0,y0],[x1,y1]],false);ctx.stroke();ctx.setLineDash([])}
+    if(G.state==='aim')aimHint('rgba(255,255,255,.75)');
     // objetos con profundidad (más abajo en pantalla = más cerca)
     const items=[];
     items.push({y:gp.y,f:()=>{const bob=Math.sin(G.t*2)*4;shadow(hx,hy,26,10);heartBody(T,hx,hy-52-bob,G.state==='win')}});
     for(let i=0;i<N;i++){const p=rp(i),py=PJ(p.x,p.y)[1];if(py<-80||py>H+80)continue;for(const g of G.gems[i]){if(!g.alive)continue;const q=gemPos(i,g,G.t);items.push({y:q.y,f:()=>{const [x,y]=PJ(q.x,q.y),z=18+Math.sin(G.t*3+q.a*2)*2;shadow(x,y+2,9*GS*spin(q.a),4*GS);gemBody(T,x,y-z,q.a,g.k,false,true)}})}}
     if(G.state!=='dead'&&G.state!=='win')items.push({y:G.ball.y,f:()=>{const [x,y]=PJ(G.ball.x,G.ball.y),z=14+(G.state==='aim'?Math.sin(G.t*4)*2:0);shadow(x,y+1,9,4);ballBody(T,x,y-z)}});
+    if(MODE==='orbit')G.free.forEach((f,fi)=>{if(f.alive)items.push({y:f.y,f:()=>{const [x,y]=PJ(f.x,f.y),z=18+Math.sin(G.t*3+fi)*2;shadow(x,y+2,9*GS*spin(G.t*2+fi),4*GS);gemBody(T,x,y-z,G.t*2+fi,f.k,false,true)}})});
     items.sort((a,b)=>a.y-b.y).forEach(o=>o.f());
     for(const p of G.trail)trailDot(T,p);
   }
@@ -217,7 +288,8 @@ function fit(){const sw=stage.clientWidth-8,sh=stage.clientHeight-8;let w=sw,h=w
 window.addEventListener('resize',fit);
 const themesEl=document.getElementById('themes'),viewsEl=document.getElementById('views'),desc=document.getElementById('desc');
 const DESC={'2d':'<b>Vista 2D</b>: cenital plana.','iso':'<b>Vista isométrica</b>: suelo en rombos, plataformas con volumen, sombras y gemas con altura.'};
-function refresh(){desc.innerHTML=DESC[VIEW]+' Mundo <b>'+THEMES[ti].name+'</b>. '}
+const MDESC={orbit:'<b>Órbita</b>: la bola gira pegada al racimo y sale hacia donde apunta; hay que cronometrar el toque.',p2p:'<b>Punto a punto</b>: el disparo siempre apunta al siguiente racimo.'};
+function refresh(){desc.innerHTML=MDESC[MODE]+' '+DESC[VIEW]+' Mundo <b>'+THEMES[ti].name+'</b>. '}
 const mk=(el,label,fn)=>{const b=document.createElement('button');b.textContent=label;b.onclick=()=>{fn();[...el.children].forEach(x=>x.classList.toggle('on',x===b));refresh()};el.appendChild(b);return b};
 THEMES.forEach((T,i)=>mk(themesEl,T.name,()=>{ti=i}));
 mk(viewsEl,'2D plano',()=>{VIEW='2d'});mk(viewsEl,'Isométrico',()=>{VIEW='iso'});
@@ -226,12 +298,15 @@ autoB.onclick=()=>{auto=!auto;autoB.textContent='Auto: '+(auto?'ON':'OFF')};
 // el toggle de vista solo marca sus dos botones; Auto no cuenta
 viewsEl.children[0].onclick=()=>{VIEW='2d';viewsEl.children[0].classList.add('on');viewsEl.children[1].classList.remove('on');refresh()};
 viewsEl.children[1].onclick=()=>{VIEW='iso';viewsEl.children[1].classList.add('on');viewsEl.children[0].classList.remove('on');refresh()};
+const modesEl=document.getElementById('modes');
+mk(modesEl,'Órbita (pegada)',()=>{MODE='orbit';reset()});mk(modesEl,'Punto a punto',()=>{MODE='p2p';reset()});
+modesEl.children[0].classList.add('on');
 themesEl.children[0].classList.add('on');viewsEl.children[0].classList.add('on');refresh();
 cv.addEventListener('pointerdown',e=>{e.preventDefault();launch()});
 let last=performance.now();
-function frame(now){const dt=Math.min(.05,(now-last)/1000);last=now;update(dt);const k=cv.width/W;ctx.setTransform(k,0,0,k,0,0);ctx.save();drawScene(THEMES[ti]);ctx.restore();requestAnimationFrame(frame)}
+function frame(now){const dt=Math.min(.05,(now-last)/1000);last=now;(MODE==='orbit'?updateOrbit:updateP2P)(dt);const k=cv.width/W;ctx.setTransform(k,0,0,k,0,0);ctx.save();drawScene(THEMES[ti]);ctx.restore();requestAnimationFrame(frame)}
 reset();fit();requestAnimationFrame(frame);
-window.__rg={get G(){return G},theme(i){themesEl.children[i].click()},view(v){viewsEl.children[v].click()}};
+window.__rg={get G(){return G},theme(i){themesEl.children[i].click()},view(v){viewsEl.children[v].click()},mode(m){modesEl.children[m].click()},step(n){const u=MODE==='orbit'?updateOrbit:updateP2P;for(let i=0;i<n;i++)u(1/60)},render(){const k=cv.width/W;ctx.setTransform(k,0,0,k,0,0);ctx.save();drawScene(THEMES[ti]);ctx.restore()}};
 })();
 </script>
 </body>
